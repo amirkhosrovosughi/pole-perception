@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<scene>
+  <!-- base -> camera pose as: x y z roll pitch yaw (radians) -->
+  <base_to_camera>0.12 0.03 0.242 0 1.57 0</base_to_camera>
+
+  <!-- pole position in world frame: x y z roll pitch yaw -->
+  <!-- this should be world coordinates where you placed the pole in Gazebo -->
+  <pole_position>0 0 0 0 0 0</pole_position>
+
+  <!-- camera intrinsics: fx fy cx cy (we'll parse K entry in your file) -->
+  <camera_intrinsics>440.07 440.07 424.0 240.0</camera_intrinsics>
+
+  <!-- pole physical height (meters) used to estimate bbox extent -->
+  <pole_height>1.0</pole_height>
+</scene>
