@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Dataset / models (not committed)
+data/
+models/
+
+# Raw bagfiles
+bags/
+
+# Logs
+*.log
