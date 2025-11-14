@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 env/
+ros_venv/
 *.egg-info/
 
 # Jupyter
