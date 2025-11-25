@@ -72,6 +72,7 @@ class BBoxFromOdomNode(Node):
         self.last_bbox_ts = None
         self.last_bbox_valid = False
         self.bridge = CvBridge()
+        self.img_shape = None
 
         print("loaded ....")
 
@@ -83,10 +84,12 @@ class BBoxFromOdomNode(Node):
         pos_odom = np.array([msg.position[0], msg.position[1], msg.position[2]])
         q_odom = np.array([msg.q[0], msg.q[1], msg.q[2], msg.q[3]])  # (w, x, y, z)
 
-        # Assume a dummy image size for now (e.g., 640x480)
-        img_shape = (480, 640, 3)
+        # If image size not loaded, skip
+        if (self.img_shape == None):
+            print("image dimension has not receive yet, skip")
+            return
 
-        result = compute_bbox_from_odom(pos_odom, q_odom, img_shape, debug=False)
+        result = compute_bbox_from_odom(pos_odom, q_odom, self.img_shape, debug=False)
 
         if result["valid"]:
             bbox = result["bbox_norm"]
@@ -103,6 +106,9 @@ class BBoxFromOdomNode(Node):
         # Convert ROS image → OpenCV
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         h, w = frame.shape[:2]
+        if (self.img_shape == None):
+            print(f"image size is: ({h}, {w})")
+            self.img_shape = (h, w, 3)
 
         if self.last_bbox_valid and self.last_bbox is not None:
             x_c, y_c, bw, bh = self.last_bbox
@@ -122,7 +128,10 @@ class BBoxFromOdomNode(Node):
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
         # Display window
-        cv2.imshow("Pole Detection Debug", frame)
+        # Downscale by 50%
+        scale = 0.5
+        display_frame = cv2.resize(frame, None, fx=scale, fy=scale)
+        cv2.imshow("Pole Detection Debug", display_frame)
         cv2.waitKey(1)
 
 

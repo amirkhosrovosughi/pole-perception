@@ -21,6 +21,10 @@ _metadata_cache = None
 DEFAULT_POLE_HEIGHT = 1.0
 MIN_BBOX_HEIGHT_PX = 6  # same filter as main script (you can change when calling compute_bbox...)
 
+_M_NED_TO_ENU = np.array([[0.0, 1.0, 0.0],
+                          [1.0, 0.0, 0.0],
+                          [0.0, 0.0, -1.0]], dtype=float)
+
 
 # --------------------------
 # Parsing metadata (internal)
@@ -93,8 +97,8 @@ def camera_physical_to_optical_T():
     # R = [[0,0,1],[1,0,0],[0,1,0]] as used earlier.
     Rm = np.array([
         [0.0, 0.0, 1.0],
-        [1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0]
+        [-1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0]
     ], dtype=float)
     T[:3, :3] = Rm
     return T
@@ -130,7 +134,13 @@ def load_metadata(metadata_path):
     raw = _parse_metadata(metadata_path)
 
     base_to_camera_T = pose_to_transform(raw['base_to_camera_pose'])  # base->camera physical
-    pole_T_world = pose_to_transform(raw['pole_position_pose'])  # pole pose in world
+
+    # If Pole Position is in NED need to run this instead
+    # raw_pole_pose = raw['pole_position_pose']  # pole pose in world (NED)
+    # pole_pose_enu = ned_to_enu_pose(raw_pole_pose)  # convert to enu
+    # pole_T_world = pose_to_transform(pole_pose_enu)  # pole pose in world
+
+    pole_T_world = pose_to_transform(raw['pole_position_pose'])
 
     # store prepared items
     _metadata_cache = {
@@ -178,6 +188,23 @@ def pose_to_transform(pose6):
     T[0:3, 0:3] = rot
     T[0:3, 3] = [x, y, z]
     return T
+
+def ned_to_enu_pose(pose6_ned):
+    """
+    Convert pose in NED convention [x, y, z, roll, pitch, yaw] (radians)
+    to ENU convention [x_e, y_e, z_e, roll_e, pitch_e, yaw_e].
+    """
+    x, y, z, roll, pitch, yaw = pose6_ned
+    # translation
+    trans_ned = np.array([x, y, z], dtype=float)
+    trans_enu = _M_NED_TO_ENU @ trans_ned
+
+    # rotation: build R_ned from euler in NED axes (xyz = roll,pitch,yaw)
+    R_ned = R.from_euler('xyz', [roll, pitch, yaw]).as_matrix()
+    R_enu = _M_NED_TO_ENU @ R_ned @ _M_NED_TO_ENU.T
+    roll_e, pitch_e, yaw_e = R.from_matrix(R_enu).as_euler('xyz')
+
+    return np.array([trans_enu[0], trans_enu[1], trans_enu[2], roll_e, pitch_e, yaw_e], dtype=float)
 
 # --------------------------
 # compute_bbox_from_odom
