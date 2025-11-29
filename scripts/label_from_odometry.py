@@ -292,12 +292,14 @@ def compute_bbox_from_odom(pos_odom, q_odom, img_shape, pole_height=None, debug=
     # pole origin in world (pole_T_world is full pose, but we only need the translation)
     pole_T_world = md['pole_T_world']
     pole_world_pos = transform_point(pole_T_world, np.array([0.0, 0.0, 0.0]))
+    pole_world_pos[2] += pole_h / 2
     pole_cam = transform_point(T_world_cam, pole_world_pos)
 
     # top/bottom in world and then in camera frame
     pole_bottom_world = pole_world_pos.copy()
     pole_top_world = pole_world_pos.copy()
-    pole_top_world[2] += pole_h  # vertical offset in world frame (z axis)
+    pole_bottom_world[2] -= pole_h / 2
+    pole_top_world[2] += pole_h / 2  # vertical offset in world frame (z axis)
     pole_bottom_cam = transform_point(T_world_cam, pole_bottom_world)
     pole_top_cam = transform_point(T_world_cam, pole_top_world)
 
@@ -332,7 +334,7 @@ def compute_bbox_from_odom(pos_odom, q_odom, img_shape, pole_height=None, debug=
     #             "proj_center": proj_center, "proj_bottom": proj_bottom, "proj_top": proj_top}
 
     # choose conservative width as fraction
-    bbox_w_px = bbox_h_px * 0.2
+    bbox_w_px = bbox_h_px * 0.4
 
     img_h = int(img_shape[0])
     img_w = int(img_shape[1])

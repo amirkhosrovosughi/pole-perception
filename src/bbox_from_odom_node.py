@@ -30,7 +30,7 @@ class BBoxFromOdomNode(Node):
         super().__init__('bbox_from_odom_node')
 
         # Hardcoded metadata path (you can later make this a ROS param)
-        metadata_path = 'bags/2025_11_06-07_23_41/metadata.xml'
+        metadata_path = 'bags/metadata_sample.xml'
 
 
         self.get_logger().info(f"Loading metadata from: {metadata_path}")
