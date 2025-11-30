@@ -58,8 +58,8 @@ if not _HAS_ROSBAGS and rosbag2_py is None:
 # --------------------------
 # Configurable defaults
 # --------------------------
-DEFAULT_LINEAR_VEL_THRESH = 0.5   # m/s (filter)
-DEFAULT_ANGULAR_VEL_THRESH = 0.1  # rad/s (filter)
+DEFAULT_LINEAR_VEL_THRESH = 1   # m/s (filter)
+DEFAULT_ANGULAR_VEL_THRESH = 0.5  # rad/s (filter)
 CLASS_ID = 0                      # single-class (pole) for YOLO
 
 
@@ -220,56 +220,62 @@ def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odo
             # Compute bbox via label_from_odometry
             pos_odom = latest_odom['pos_odom']
             q_odom = latest_odom['q_odom']
-            res = compute_bbox_from_odom(pos_odom, q_odom, img.shape, pole_height=None, debug=False)
+            results = compute_bbox_from_odom(pos_odom, q_odom, img.shape, pole_height=None, debug=False)
 
-            if not res.get('valid', False):
-                # optional: log reason when debugging
-                print("skipping frame:", res.get('reason'))
+            skipSample = False
+            proj_centers = []
+            poles_cam = []
+            poles_bottom_cam = []
+            poles_top_cam = []
+
+            for res in results:
+                if not res.get('valid', False):
+                    if res.get('reason') != "not_visible":
+                        skipSample = True
+                    # optional: log reason when debugging
+                    print("skipping object:", res.get('reason'))
+                    continue
+
+                # Unpack results and save
+                bbox_norm = res['bbox_norm']
+                proj_center = res['proj_center']
+                pole_cam = res['pole_cam']
+                pole_bottom_cam = res['pole_bottom_cam']
+                pole_top_cam = res['pole_top_cam']
+
+                proj_centers.append(proj_center)
+                poles_cam.append(pole_cam)
+                poles_bottom_cam.append(pole_bottom_cam)
+                poles_top_cam.append(pole_top_cam)
+
+                label_filename = f"{frame_idx:06d}.txt"     
+            
+                # write YOLO label
+                with open(str(labels_dir / label_filename), 'a') as f:
+                    x_c, y_c, w, h = bbox_norm
+                    f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}\n")
+
+                # Save label for CVAT
+                with open(str(images_cvat_dir / label_filename), 'a') as f:
+                    x_c, y_c, w, h = bbox_norm
+                    f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}\n")
+
+            if skipSample:
+                print("skipping frame")
                 continue
 
-            # Unpack results and save
-            bbox_norm = res['bbox_norm']
-            proj_center = res['proj_center']
-            pole_cam = res['pole_cam']
-            pole_bottom_cam = res['pole_bottom_cam']
-            pole_top_cam = res['pole_top_cam']
+            if len(results) == 0:
+                # No poles visible → create empty label file
+                with open(str(images_cvat_dir / label_filename), 'w') as f:
+                    f.write("")
+                with open(str(labels_dir / label_filename), 'w') as f:
+                    f.write("")
 
             img_filename = f"{frame_idx:06d}.jpg"
-            label_filename = f"{frame_idx:06d}.txt"
-            json_filename = f"{frame_idx:06d}.json"
-
             cv2.imwrite(str(images_dir / img_filename), img)
-            # write YOLO label
-            with open(str(labels_dir / label_filename), 'w') as f:
-                x_c, y_c, w, h = bbox_norm
-                f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}\n")
-
-            if save_json:
-                meta = {
-                    'frame_index': frame_idx,
-                    'img_file': img_filename,
-                    'pole_cam_xyz': pole_cam.tolist(),
-                    'pole_bottom_cam_xyz': pole_bottom_cam.tolist(),
-                    'pole_top_cam_xyz': pole_top_cam.tolist(),
-                    'proj_center': proj_center,
-                    'camera_fx_fy_cx_cy': [res.get('fx', None), res.get('fy', None), res.get('cx', None), res.get('cy', None)],
-                    'odom_linear_speed': latest_odom['vel_lin'],
-                    'odom_angular_speed': latest_odom['vel_ang'],
-                }
-                with open(str(json_dir / json_filename), 'w') as jf:
-                    json.dump(meta, jf, indent=2)
-
-
-            img_filename = f"{frame_idx:06d}.jpg"
-            label_filename = f"{frame_idx:06d}.txt"
 
             # Save image
             cv2.imwrite(str(images_cvat_dir / img_filename), img)
-
-            # Save label
-            with open(str(images_cvat_dir / label_filename), 'w') as f:
-                x_c, y_c, w, h = bbox_norm
-                f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}\n")
 
             # Update train.txt with relative path to image
             train_lines.append(str((images_cvat_dir / img_filename).relative_to(cvat_dir)))
@@ -277,6 +283,23 @@ def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odo
             # Write train.txt incrementally
             with open(train_file, 'w') as f:
                 f.write("\n".join(train_lines) + "\n")
+
+            # metadata
+            json_filename = f"{frame_idx:06d}.json"
+
+            if save_json:
+                meta = {
+                    'frame_index': frame_idx,
+                    'img_file': img_filename,
+                    'pole_cam_xyz': [p.tolist() for p in poles_cam],
+                    'pole_bottom_cam_xyz': [p.tolist() for p in poles_bottom_cam],
+                    'pole_top_cam_xyz': [p.tolist() for p in poles_top_cam],
+                    'proj_center': [list(p) for p in proj_centers],
+                    'odom_linear_speed': latest_odom['vel_lin'],
+                    'odom_angular_speed': latest_odom['vel_ang'],
+                }
+                with open(str(json_dir / json_filename), 'w') as jf:
+                    json.dump(meta, jf, indent=2)
 
             frame_idx += 1
 

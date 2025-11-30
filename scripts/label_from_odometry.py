@@ -41,18 +41,32 @@ def _parse_metadata(metadata_path):
             raise ValueError(f"{tag} must contain 6 numbers (x y z roll pitch yaw)")
         return nums
 
+    def parse_multiple_poses(parent_tag):
+        parent = root.find(parent_tag)
+        if parent is None:
+            return []
+        poses = []
+        for pole_el in parent.findall('pole'):
+            nums = [float(x) for x in pole_el.text.strip().split()]
+            if len(nums) != 6:
+                raise ValueError("Each <pole> must contain 6 numbers (x y z roll pitch yaw)")
+            poses.append(nums)
+        return poses
+
     base_to_camera = parse_pose_text('base_to_camera')
-    pole_position = parse_pose_text('pole_position')
+    poles_position = parse_multiple_poses('poles_position')
+
     cam_intr = root.find('camera_intrinsics')
     if cam_intr is None:
         raise ValueError("camera_intrinsics tag missing in metadata.xml (fx fy cx cy)")
     fx, fy, cx, cy = [float(x) for x in cam_intr.text.strip().split()]
+
     pole_height_el = root.find('pole_height')
     pole_height = float(pole_height_el.text.strip()) if pole_height_el is not None else DEFAULT_POLE_HEIGHT
 
     return {
         'base_to_camera_pose': np.array(base_to_camera, dtype=float),
-        'pole_position_pose': np.array(pole_position, dtype=float),
+        'poles_position_pose': np.array(poles_position, dtype=float),
         'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy,
         'pole_height': pole_height
     }
@@ -70,6 +84,16 @@ def pose_to_transform(pose6):
     T[0:3, 3] = [x, y, z]
     return T
 
+def poses_to_transforms(poses6):
+    """
+    Convert an Nx6 array/list of poses into a list of 4x4 transforms.
+    Each pose is [x, y, z, roll, pitch, yaw].
+    """
+    transforms = []
+    for pose6 in poses6:
+        T = pose_to_transform(pose6)
+        transforms.append(T)
+    return np.array(transforms, dtype=float) 
 
 def invert_transform(T):
     Rm = T[0:3, 0:3]
@@ -135,17 +159,14 @@ def load_metadata(metadata_path):
 
     base_to_camera_T = pose_to_transform(raw['base_to_camera_pose'])  # base->camera physical
 
-    # If Pole Position is in NED need to run this instead
-    # raw_pole_pose = raw['pole_position_pose']  # pole pose in world (NED)
-    # pole_pose_enu = ned_to_enu_pose(raw_pole_pose)  # convert to enu
-    # pole_T_world = pose_to_transform(pole_pose_enu)  # pole pose in world
+    # If Poles Position is in NED need to run this instead
 
-    pole_T_world = pose_to_transform(raw['pole_position_pose'])
+    poles_T_world = poses_to_transforms(raw['poles_position_pose'])
 
     # store prepared items
     _metadata_cache = {
         'base_to_camera_T': base_to_camera_T,
-        'pole_T_world': pole_T_world,
+        'poles_T_world': poles_T_world,
         'fx': raw['fx'],
         'fy': raw['fy'],
         'cx': raw['cx'],
@@ -290,73 +311,86 @@ def compute_bbox_from_odom(pos_odom, q_odom, img_shape, pole_height=None, debug=
         print("[label_from_odometry] cam_T_world:\n", cam_T_world)
 
     # pole origin in world (pole_T_world is full pose, but we only need the translation)
-    pole_T_world = md['pole_T_world']
-    pole_world_pos = transform_point(pole_T_world, np.array([0.0, 0.0, 0.0]))
-    pole_world_pos[2] += pole_h / 2
-    pole_cam = transform_point(T_world_cam, pole_world_pos)
+    poles_T_world = md['poles_T_world']
 
-    # top/bottom in world and then in camera frame
-    pole_bottom_world = pole_world_pos.copy()
-    pole_top_world = pole_world_pos.copy()
-    pole_bottom_world[2] -= pole_h / 2
-    pole_top_world[2] += pole_h / 2  # vertical offset in world frame (z axis)
-    pole_bottom_cam = transform_point(T_world_cam, pole_bottom_world)
-    pole_top_cam = transform_point(T_world_cam, pole_top_world)
+    results = []
 
-    if debug:
-        print("  pole_world_pos:", pole_world_pos)
-        print("  pole_cam:", pole_cam)
-        print("  pole_bottom_cam:", pole_bottom_cam)
-        print("  pole_top_cam:", pole_top_cam)
+    for pole_T_world in poles_T_world:
+        pole_world_pos = transform_point(pole_T_world, np.array([0.0, 0.0, 0.0]))
+        pole_world_pos[2] += pole_h / 2
+        pole_cam = transform_point(T_world_cam, pole_world_pos)
 
-    # project
-    proj_center = project_point_to_image(pole_cam, fx, fy, cx, cy, debug=debug)
-    proj_bottom = project_point_to_image(pole_bottom_cam, fx, fy, cx, cy, debug=debug)
-    proj_top = project_point_to_image(pole_top_cam, fx, fy, cx, cy, debug=debug)
+        # top/bottom in world and then in camera frame
+        pole_bottom_world = pole_world_pos.copy()
+        pole_top_world = pole_world_pos.copy()
+        pole_bottom_world[2] -= pole_h / 2
+        pole_top_world[2] += pole_h / 2  # vertical offset in world frame (z axis)
+        pole_bottom_cam = transform_point(T_world_cam, pole_bottom_world)
+        pole_top_cam = transform_point(T_world_cam, pole_top_world)
 
-    if proj_center is None or proj_bottom is None or proj_top is None:
         if debug:
-            print("[label_from_odometry] one or more projections invalid -> not visible")
-        return {"valid": False, "reason": "not_visible",
-                "proj_center": proj_center, "proj_bottom": proj_bottom, "proj_top": proj_top,
-                "pole_cam": pole_cam, "pole_top_cam": pole_top_cam, "pole_bottom_cam": pole_bottom_cam}
+            print("  pole_world_pos:", pole_world_pos)
+            print("  pole_cam:", pole_cam)
+            print("  pole_bottom_cam:", pole_bottom_cam)
+            print("  pole_top_cam:", pole_top_cam)
 
-    # pixel coords
-    u_c, v_c, zc = proj_center
-    u_b, v_b, zb = proj_bottom
-    u_t, v_t, zt = proj_top
+        # project
+        proj_center = project_point_to_image(pole_cam, fx, fy, cx, cy, debug=debug)
+        proj_bottom = project_point_to_image(pole_bottom_cam, fx, fy, cx, cy, debug=debug)
+        proj_top = project_point_to_image(pole_top_cam, fx, fy, cx, cy, debug=debug)
 
-    bbox_h_px = abs(v_b - v_t)
-    # if bbox_h_px < MIN_BBOX_HEIGHT_PX: #TODO looks necessary, but commented temporaty for furthur verifications
-    #     if debug:
-    #         print(f"[label_from_odometry] bbox height too small: {bbox_h_px}px (threshold {MIN_BBOX_HEIGHT_PX})")
-    #     return {"valid": False, "reason": "too_small", "bbox_h_px": bbox_h_px,
-    #             "proj_center": proj_center, "proj_bottom": proj_bottom, "proj_top": proj_top}
+        if proj_center is None or proj_bottom is None or proj_top is None:
+            if debug:
+                print("[label_from_odometry] one or more projections invalid -> not visible")
+            result =  {"valid": False, "reason": "not_visible",
+                    "proj_center": proj_center, "proj_bottom": proj_bottom, "proj_top": proj_top,
+                    "pole_cam": pole_cam, "pole_top_cam": pole_top_cam, "pole_bottom_cam": pole_bottom_cam}
+            results.append(result)
+            continue
 
-    # choose conservative width as fraction
-    bbox_w_px = bbox_h_px * 0.4
+        # pixel coords
+        u_c, v_c, zc = proj_center
+        u_b, v_b, zb = proj_bottom
+        u_t, v_t, zt = proj_top
 
-    img_h = int(img_shape[0])
-    img_w = int(img_shape[1])
+        bbox_h_px = abs(v_b - v_t)
+        # if bbox_h_px < MIN_BBOX_HEIGHT_PX: #TODO looks necessary, but commented temporaty for furthur verifications
+        #     if debug:
+        #         print(f"[label_from_odometry] bbox height too small: {bbox_h_px}px (threshold {MIN_BBOX_HEIGHT_PX})")
+        #     result = {"valid": False, "reason": "too_small", "bbox_h_px": bbox_h_px,
+        #             "proj_center": proj_center, "proj_bottom": proj_bottom, "proj_top": proj_top}
+        #       results.append(result)
+        #       continue
 
-    x_center = u_c
-    y_center = (v_b + v_t) / 2.0
+        # choose conservative width as fraction
+        bbox_w_px = bbox_h_px * 0.4
 
-    # normalized YOLO-style (x_center/img_w, y_center/img_h, w/img_w, h/img_h)
-    x_c_norm = x_center / img_w
-    y_c_norm = y_center / img_h
-    w_norm = bbox_w_px / img_w
-    h_norm = bbox_h_px / img_h
+        img_h = int(img_shape[0])
+        img_w = int(img_shape[1])
 
-    return {
-        "valid": True,
-        "bbox_norm": (x_c_norm, y_c_norm, w_norm, h_norm),
-        "bbox_px": (x_center, y_center, bbox_w_px, bbox_h_px),
-        "proj_center": proj_center,
-        "proj_top": proj_top,
-        "proj_bottom": proj_bottom,
-        "pole_cam": pole_cam,
-        "pole_top_cam": pole_top_cam,
-        "pole_bottom_cam": pole_bottom_cam,
-        "cam_T_world": cam_T_world
-    }
+        x_center = u_c
+        y_center = (v_b + v_t) / 2.0
+
+        # normalized YOLO-style (x_center/img_w, y_center/img_h, w/img_w, h/img_h)
+        x_c_norm = x_center / img_w
+        y_c_norm = y_center / img_h
+        w_norm = bbox_w_px / img_w
+        h_norm = bbox_h_px / img_h
+
+        result = {
+            "valid": True,
+            "bbox_norm": (x_c_norm, y_c_norm, w_norm, h_norm),
+            "bbox_px": (x_center, y_center, bbox_w_px, bbox_h_px),
+            "proj_center": proj_center,
+            "proj_top": proj_top,
+            "proj_bottom": proj_bottom,
+            "pole_cam": pole_cam,
+            "pole_top_cam": pole_top_cam,
+            "pole_bottom_cam": pole_bottom_cam,
+            "cam_T_world": cam_T_world
+        }
+
+        results.append(result)
+
+    print(f"Insider: results.len {len(results)}")
+    return results

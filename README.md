@@ -42,8 +42,8 @@ pip install -r requirements.txt
 pip install rosbags==0.9.21
 
 python scripts/parse_bag_to_yolo.py \
-  --bag bags/2025_11_27-11_09_41/rosbag2_2025_11_27-11_09_41 \
-  --metadata bags/2025_11_27-11_09_41/metadata.xml \
+  --bag bags/2025_11_30-12_30_33/rosbag2_2025_11_30-12_30_33 \
+  --metadata bags/2025_11_30-12_30_33/metadata.xml \
   --output data/train \
   --topic-image /camera \
   --topic-odom /fmu/out/vehicle_odometry
