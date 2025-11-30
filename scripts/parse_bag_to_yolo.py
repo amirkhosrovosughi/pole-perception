@@ -63,6 +63,29 @@ DEFAULT_ANGULAR_VEL_THRESH = 0.1  # rad/s (filter)
 CLASS_ID = 0                      # single-class (pole) for YOLO
 
 
+def create_cvat_annotation_zip(cvat_dir: Path, out_dir: Path) -> Path:
+    """
+    Creates a CVAT-compatible annotation.zip file.
+    
+    Args:
+        cvat_dir (Path): Path to the directory containing the converted CVAT dataset.
+        out_dir (Path): Directory where annotation.zip should be saved.
+
+    Returns:
+        Path: The path to the generated annotation.zip file.
+    """
+    import zipfile
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = out_dir / "annotation.zip"
+
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for file in cvat_dir.rglob('*'):
+            zf.write(file, file.relative_to(cvat_dir.parent))
+
+    print(f"CVAT annotation zip created: {zip_path}")
+    return zip_path
+
 def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odom,
                          lin_thresh, ang_thresh, save_json=True):
     """
@@ -94,6 +117,33 @@ def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odo
     if save_json:
         json_dir.mkdir(parents=True, exist_ok=True)
 
+    # Create output folder for CVAT
+    cvat_dir = Path(out_dir) / "annotation"
+    images_cvat_dir = cvat_dir / "obj_train_data" / "images"
+    images_cvat_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write class names and obj.data
+    class_names_file = cvat_dir / "obj.names"
+    obj_data_file = cvat_dir / "obj.data"
+    train_file = cvat_dir / "train.txt"
+
+    # Single-class example
+    with open(class_names_file, 'w') as f:
+        f.write("pole\n")
+
+    with open(obj_data_file, 'w') as f:
+        f.write(f"classes = 1\n")
+        f.write(f"train = {train_file.relative_to(cvat_dir)}\n")
+        f.write(f"names = {class_names_file.relative_to(cvat_dir)}\n")
+        f.write(f"backup = backup/\n")
+
+    # If train.txt exists, load existing lines
+    if train_file.exists():
+        with open(train_file, 'r') as f:
+            train_lines = f.read().splitlines()
+    else:
+        train_lines = []
+
     # Pre-load metadata
     load_metadata(metadata_path)
     if not is_metadata_loaded():
@@ -111,7 +161,13 @@ def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odo
         raise RuntimeError("Requested topics not found in bag. Check topic names.")
 
     latest_odom = None
-    frame_idx = 0
+    existing_images = list(images_cvat_dir.glob("*.jpg"))
+    if existing_images:
+        # get the max existing frame index
+        last_idx = max(int(p.stem) for p in existing_images) + 1
+    else:
+        last_idx = 0
+    frame_idx = last_idx
 
     for connection, timestamp, rawdata in tqdm(reader.messages(), desc="Reading bag"):
         topic = connection.topic
@@ -203,9 +259,29 @@ def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odo
                 with open(str(json_dir / json_filename), 'w') as jf:
                     json.dump(meta, jf, indent=2)
 
+
+            img_filename = f"{frame_idx:06d}.jpg"
+            label_filename = f"{frame_idx:06d}.txt"
+
+            # Save image
+            cv2.imwrite(str(images_cvat_dir / img_filename), img)
+
+            # Save label
+            with open(str(images_cvat_dir / label_filename), 'w') as f:
+                x_c, y_c, w, h = bbox_norm
+                f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}\n")
+
+            # Update train.txt with relative path to image
+            train_lines.append(str((images_cvat_dir / img_filename).relative_to(cvat_dir)))
+
+            # Write train.txt incrementally
+            with open(train_file, 'w') as f:
+                f.write("\n".join(train_lines) + "\n")
+
             frame_idx += 1
 
     print(f"Saved {frame_idx} samples to {out_dir}")
+    zip_file = create_cvat_annotation_zip(cvat_dir, out_dir)
     reader.close()
 
 
