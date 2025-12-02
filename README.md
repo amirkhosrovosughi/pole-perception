@@ -42,8 +42,8 @@ pip install -r requirements.txt
 pip install rosbags==0.9.21
 
 python scripts/parse_bag_to_yolo.py \
-  --bag bags/2025_11_30-12_30_33/rosbag2_2025_11_30-12_30_33 \
-  --metadata bags/2025_11_30-12_30_33/metadata.xml \
+  --bag bags/2025_11_30-14_17_05/rosbag2_2025_11_30-14_17_05 \
+  --metadata bags/2025_11_30-14_17_05/metadata.xml \
   --output data/train \
   --topic-image /camera \
   --topic-odom /fmu/out/vehicle_odometry
@@ -103,3 +103,39 @@ After making changes:
 1. Open your task
 2. Click Export → YOLO format (or CVAT-specific formats)
 3. Replace/update your dataset with the exported labels.
+
+
+## Create a clean YOLO training environment
+<pre>
+python3 -m venv yolo_train_venv
+source yolo_train_venv/bin/activate
+
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/<right_version_gpu>
+pip install ultralytics opencv-python matplotlib jupyter tqdm
+pip install pillow
+pip install pyyaml
+</pre>
+
+
+
+Confirm that they are installed correctly
+<pre>
+yolo
+python -c "import torch; print(torch.cuda.is_available())"
+</pre>
+
+
+## Import Data into YOLO Dataset
+
+This script copies images and labels into a unified YOLO dataset and automatically renames files so numbering continues without collisions.
+
+Usage
+<pre>
+cd ~/pole_perception
+python scripts/import_dataset.py <source_path>
+</pre>
+
+What it does
+- nsures data/yolo_pole_dataset/images/train and labels/train exist
+- Renames files to continuous IDs
+- Copies images/labels into the YOLO dataset

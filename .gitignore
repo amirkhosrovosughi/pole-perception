@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 env/
+yolo_train_venv/
 ros_venv/
 *.egg-info/
 
