@@ -6,7 +6,11 @@ venv/
 env/
 yolo_train_venv/
 ros_venv/
+assets/
+runs/
+notebooks/runs/
 *.egg-info/
+yolo11n.pt
 
 # Jupyter
 .ipynb_checkpoints/

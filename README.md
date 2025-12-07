@@ -132,10 +132,64 @@ This script copies images and labels into a unified YOLO dataset and automatical
 Usage
 <pre>
 cd ~/pole_perception
+source yolo_train_venv/bin/activate
 python scripts/import_dataset.py <source_path>
+</pre>
+
+Or with a custom validation split:
+<pre>
+source yolo_train_venv/bin/activate
+python scripts/import_dataset.py <source_path> --val 0.25
 </pre>
 
 What it does
 - nsures data/yolo_pole_dataset/images/train and labels/train exist
 - Renames files to continuous IDs
 - Copies images/labels into the YOLO dataset
+
+## install and setup Jupyter
+<pre>
+source yolo_train_venv/bin/activate
+pip install --upgrade pip
+pip install jupyterlab ipykernel
+
+# register this venv as a kernel (name and display name you can change)
+python -m ipykernel install --user --name yolo_train --display-name "Python (yolo_train_venv)"
+
+mkdir -p notebooks
+touch notebooks/train_yolo.ipynb
+
+# Runnig jupyter
+# from ~/pole_perception and with your venv still activated
+jupyter lab --notebook-dir=notebooks
+</pre>
+
+Follow the instruction to open the file, or copy + paste the provided link into your browser.
+
+In the JupyterLab UI, click File → New → Notebook.
+In the top-right kernel selector choose Python (yolo_train_venv) (the display name you set).
+Save the notebook as train_yolo.ipynb inside notebooks/.
+
+
+
+## Train the model
+For quick training and validation for terminal, you can run
+
+<pre>
+yolo train model=yolo11n.pt data=data/yolo_pole_dataset/dataset.yaml \
+    imgsz=512 batch=4 epochs=100 mosaic=0 auto_augment=0 erasing=0
+</pre>
+
+To test the performance of model on the picture, you can try:
+<pre>
+yolo predict model=runs/detect/train3/weights/best.pt source=<path_to_image>
+</pre>
+
+Or you can do the same with following the instructin on the Jupyter file train_yolo.ipyn.
+
+
+## Convert the model to executable to use in ROS2 c++ node
+yolo export model=runs/detect/train3/weights/best.pt format=onnx
+This generates an ONNX model compatible with C++ inference in ROS2.
+
+

@@ -1,0 +1,199 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "b45bba29-28f9-47ff-888d-2199df980e21",
+   "metadata": {},
+   "source": [
+    "# YOLO training notebook\n",
+    "Environment: `yolo_train_venv`\n",
+    "Repo root: `~/pole_perception`\n",
+    "Dataset: `data/yolo_pole_dataset/dataset.yaml`"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "0a4ad1c2-5ed2-4cc9-8f5f-7afe045d8851",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Python: /home/avosughi/pole_perception/yolo_train_venv/bin/python\n",
+      "CWD: /home/avosughi/pole_perception/notebooks\n",
+      "torch: 2.9.1+cu130 cuda: True\n"
+     ]
+    }
+   ],
+   "source": [
+    "# kernel / env check\n",
+    "import sys, os\n",
+    "print(\"Python:\", sys.executable)\n",
+    "print(\"CWD:\", os.getcwd())\n",
+    "\n",
+    "# optional: check torch and cuda availability\n",
+    "try:\n",
+    "    import torch\n",
+    "    print(\"torch:\", torch.__version__, \"cuda:\", torch.cuda.is_available())\n",
+    "except Exception as e:\n",
+    "    print(\"torch not available:\", e)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "fcba00aa-4796-4f68-b5b0-97206e049a21",
+   "metadata": {},
+   "source": [
+    "## Train model directly (will block until the training is over) "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "12928038-cd16-4980-b49a-7ac805b79767",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "%%bash\n",
+    "yolo train \\\n",
+    "  model=yolo11n.pt \\\n",
+    "  data=data/yolo_pole_dataset/dataset.yaml \\\n",
+    "  imgsz=512 \\\n",
+    "  batch=4 \\\n",
+    "  epochs=100 \\\n",
+    "  mosaic=0 \\\n",
+    "  auto_augment=0 \\\n",
+    "  erasing=0"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "28a4254e-3185-4507-96c9-df59db8f3ed2",
+   "metadata": {},
+   "source": [
+    "## Show the last trainign image"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e4064454-122c-468e-8869-d8ee8c8b0832",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from IPython.display import Image, display\n",
+    "import glob, os\n",
+    "\n",
+    "# find latest runs directory (Ultralytics typically saves to runs/train/exp, exp2, ... )\n",
+    "runs = sorted(glob.glob('runs/train/*'), key=os.path.getmtime, reverse=True)\n",
+    "if runs:\n",
+    "    last = runs[0]\n",
+    "    # example: show results.png or labels/ or weights\n",
+    "    possible = [os.path.join(last, 'results.png'), os.path.join(last, 'plots', 'confusion_matrix.png')]\n",
+    "    for p in possible:\n",
+    "        if os.path.exists(p):\n",
+    "            display(Image(filename=p))\n",
+    "            break\n",
+    "    else:\n",
+    "        print(\"No image found in\", last, \" — list files:\", os.listdir(last)[:10])\n",
+    "else:\n",
+    "    print(\"No runs found yet in runs/train/\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "9664744c-aa28-4626-b1f1-a3ef0275566c",
+   "metadata": {},
+   "source": [
+    "## Train on Background (recommended)\n",
+    "To run the training in background without blocking notebook"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "f946dfef-1f72-4c88-9f3e-21f1f1f777ac",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import subprocess, time, os\n",
+    "\n",
+    "logfile = 'runs/train/train_background.log'\n",
+    "os.makedirs(os.path.dirname(logfile), exist_ok=True)\n",
+    "\n",
+    "cmd = [\n",
+    "    \"yolo\", \"train\",\n",
+    "    \"model=yolo11n.pt\",\n",
+    "    \"data=data/yolo_pole_dataset/dataset.yaml\",\n",
+    "    \"imgsz=512\",\n",
+    "    \"batch=4\",\n",
+    "    \"epochs=100\",\n",
+    "    \"mosaic=1\",\n",
+    "    \"auto_augment=2\",\n",
+    "    \"erasing=0.5\"\n",
+    "]\n",
+    "\n",
+    "# start the process; it will continue after cell finishes\n",
+    "with open(logfile, \"wb\") as out:\n",
+    "    p = subprocess.Popen(\" \".join(cmd), shell=True, stdout=out, stderr=subprocess.STDOUT)\n",
+    "\n",
+    "print(\"Started background training pid\", p.pid, \"logs ->\", logfile)\n",
+    "# to check progress later, display tail:\n",
+    "!tail -n 50 runs/train/train_background.log"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "be33d899-6377-49b3-a289-59a2a5b79555",
+   "metadata": {},
+   "source": [
+    "## To use and validate the model after training"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "070fb04c-7b2b-4d60-9899-23866aea68f9",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from ultralytics import YOLO\n",
+    "from PIL import Image\n",
+    "import matplotlib.pyplot as plt\n",
+    "\n",
+    "# Load model\n",
+    "model = YOLO(\"runs/detect/train3/weights/best.pt\")\n",
+    "\n",
+    "# Run inference\n",
+    "result = model(\"assets/test_image.jpg\")[0]\n",
+    "\n",
+    "# Show result\n",
+    "plt.imshow(result.plot())\n",
+    "plt.axis(\"off\")"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python (yolo_train_venv)",
+   "language": "python",
+   "name": "yolo_train"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.10.12"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
