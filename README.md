@@ -10,7 +10,27 @@ Detect and classify utility poles from drone imagery using YOLO-based object det
 
 ## ⚙️ Quick Start
 
-Collect data:
+This section walks through the steps required to **collect data and train the model**.  
+This repository is **tightly integrated** with the main project:
+
+👉 https://github.com/amirkhosrovosughi/drone-adventure
+
+The goal of this repository is to **train a deep learning model** that can be deployed in the above project.  
+Data collection and validation are performed using the **Gazebo simulator** provided in that repository.
+
+---
+
+## 📊 Data Collection (Analytical Labeling)
+
+One approach to data collection is **analytical labeling**, where known **pole positions** and **robot odometry** are used to generate initial labeled data.
+
+> ⚠️ The generated dataset will not be perfectly accurate, but it provides a **useful starting point** for bootstrapping the training process.
+
+To collect this data, we record relevant topics from the **Gazebo simulator** into a **ROS bag file**.
+
+The following topics should be stored:
+
+
 <pre>
 ros2 bag record /camera /fmu/out/vehicle_odometry
 </pre>
@@ -104,7 +124,7 @@ After making changes:
 2. Click Export → YOLO format (or CVAT-specific formats)
 3. Replace/update your dataset with the exported labels.
 
-
+# Training YOLO model
 ## Create a clean YOLO training environment
 <pre>
 python3 -m venv yolo_train_venv
@@ -147,6 +167,29 @@ What it does
 - Renames files to continuous IDs
 - Copies images/labels into the YOLO dataset
 
+## Train the model
+For quick training and validation for terminal, you can run
+
+<pre>
+yolo train model=yolo11n.pt data=data/yolo_pole_dataset/dataset.yaml \
+    imgsz=512 batch=4 epochs=100 mosaic=0 auto_augment=0 erasing=0
+</pre>
+
+To test the performance of model on the picture, you can try:
+<pre>
+yolo predict model=runs/detect/train3/weights/best.pt source=<path_to_image>
+</pre>
+
+Or you can do the same with following the instructin on the Jupyter file train_yolo.ipyn.
+
+
+## Convert the model to executable to use in ROS2 c++ node
+<pre>
+yolo export model=runs/detect/train3/weights/best.pt format=onnx opset=17
+</pre>
+This generates an ONNX model compatible with C++ inference in ROS2.
+
+# Side tools
 ## install and setup Jupyter
 <pre>
 source yolo_train_venv/bin/activate
@@ -169,27 +212,5 @@ Follow the instruction to open the file, or copy + paste the provided link into 
 In the JupyterLab UI, click File → New → Notebook.
 In the top-right kernel selector choose Python (yolo_train_venv) (the display name you set).
 Save the notebook as train_yolo.ipynb inside notebooks/.
-
-
-
-## Train the model
-For quick training and validation for terminal, you can run
-
-<pre>
-yolo train model=yolo11n.pt data=data/yolo_pole_dataset/dataset.yaml \
-    imgsz=512 batch=4 epochs=100 mosaic=0 auto_augment=0 erasing=0
-</pre>
-
-To test the performance of model on the picture, you can try:
-<pre>
-yolo predict model=runs/detect/train3/weights/best.pt source=<path_to_image>
-</pre>
-
-Or you can do the same with following the instructin on the Jupyter file train_yolo.ipyn.
-
-
-## Convert the model to executable to use in ROS2 c++ node
-yolo export model=runs/detect/train3/weights/best.pt format=onnx
-This generates an ONNX model compatible with C++ inference in ROS2.
 
 
