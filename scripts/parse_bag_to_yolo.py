@@ -58,8 +58,9 @@ if not _HAS_ROSBAGS and rosbag2_py is None:
 # --------------------------
 # Configurable defaults
 # --------------------------
-DEFAULT_LINEAR_VEL_THRESH = 1   # m/s (filter)
-DEFAULT_ANGULAR_VEL_THRESH = 0.5  # rad/s (filter)
+DEFAULT_LINEAR_VEL_THRESH = 2     # m/s (filter)
+DEFAULT_ANGULAR_VEL_THRESH = 1    # rad/s (filter)
+DEFAULT_SAMPLE_STRIDE = 5         # Keep every Nth frame  
 CLASS_ID = 0                      # single-class (pole) for YOLO
 
 
@@ -87,7 +88,7 @@ def create_cvat_annotation_zip(cvat_dir: Path, out_dir: Path) -> Path:
     return zip_path
 
 def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odom,
-                         lin_thresh, ang_thresh, save_json=True):
+                         lin_thresh, ang_thresh, frame_stride, save_json=True):
     """
     Use 'rosbags' Reader to iterate messages and produce dataset.
     """
@@ -169,6 +170,8 @@ def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odo
         last_idx = 0
     frame_idx = last_idx
 
+    image_number = 0
+
     for connection, timestamp, rawdata in tqdm(reader.messages(), desc="Reading bag"):
         topic = connection.topic
         msg = deserialize_cdr(rawdata, connection.msgtype)
@@ -192,6 +195,10 @@ def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odo
             }
 
         elif topic == topic_image:
+            image_number += 1
+            if (image_number % frame_stride != 0):
+                continue   
+
             if latest_odom is None:
                 continue
 
@@ -320,6 +327,7 @@ def main():
     parser.add_argument("--topic-odom", default="/fmu/out/vehicle_odometry", help="Odometry topic name")
     parser.add_argument("--linear-thresh", type=float, default=DEFAULT_LINEAR_VEL_THRESH)
     parser.add_argument("--angular-thresh", type=float, default=DEFAULT_ANGULAR_VEL_THRESH)
+    parser.add_argument("--frame_stride", type=int , default=DEFAULT_SAMPLE_STRIDE)
     parser.add_argument("--no-json", dest="save_json", action="store_false")
     args = parser.parse_args()
 
@@ -331,7 +339,8 @@ def main():
 
     if _HAS_ROSBAGS:
         process_with_rosbags(args.bag, args.metadata, out_dir, args.topic_image, args.topic_odom,
-                             args.linear_thresh, args.angular_thresh, save_json=args.save_json)
+                             args.linear_thresh, args.angular_thresh, args.frame_stride,
+                             save_json=args.save_json)
     else:
         print("rosbags package not available. Please install it: pip install rosbags")
         sys.exit(1)

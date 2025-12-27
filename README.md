@@ -177,7 +177,7 @@ yolo train model=yolo11n.pt data=data/yolo_pole_dataset/dataset.yaml \
 
 To test the performance of model on the picture, you can try:
 <pre>
-yolo predict model=runs/detect/train3/weights/best.pt source=<path_to_image>
+yolo predict model=runs/detect/train3/weights/best.pt source=<path_to_image_or_folder>
 </pre>
 
 Or you can do the same with following the instructin on the Jupyter file train_yolo.ipyn.
@@ -188,6 +188,15 @@ Or you can do the same with following the instructin on the Jupyter file train_y
 yolo export model=runs/detect/train3/weights/best.pt format=onnx opset=17
 </pre>
 This generates an ONNX model compatible with C++ inference in ROS2.
+
+To verify the performance of this exported model, use this:
+
+<pre>
+yolo predict \
+  model=/home/avosughi/labeled_data/model/best.onnx \
+  source=~/temp_test/000094.jpg \
+  device=cpu
+<\pre>
 
 # Side tools
 ## install and setup Jupyter
