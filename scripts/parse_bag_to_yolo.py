@@ -235,6 +235,7 @@ def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odo
             poles_bottom_cam = []
             poles_top_cam = []
 
+            label_filename = f"{frame_idx:06d}.txt"  
             for res in results:
                 if not res.get('valid', False):
                     if res.get('reason') != "not_visible":
@@ -254,8 +255,6 @@ def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odo
                 poles_cam.append(pole_cam)
                 poles_bottom_cam.append(pole_bottom_cam)
                 poles_top_cam.append(pole_top_cam)
-
-                label_filename = f"{frame_idx:06d}.txt"     
             
                 # write YOLO label
                 with open(str(labels_dir / label_filename), 'a') as f:
