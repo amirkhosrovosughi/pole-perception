@@ -2,8 +2,26 @@
 """
 parse_bag_to_yolo.py
 
-Reads a ros2 bag (using rosbags), extracts images and odometry and uses label_from_odometry
-to compute YOLO-format bounding boxes and save images + labels + JSON metadata.
+Reads a ros2 bag (using rosbags), extracts images and generates YOLO-format
+labels using one of two methods:
+
+1) Preferred (if available):
+   - Uses bounding boxes from `/featureDetection/bbox`
+   - Message type: vision_msgs::msg::Detection3DArray
+   - Uses 2D bounding box info only (x, y, size.x, size.y)
+   - Values are already normalized in [0, 1]
+   - No metadata or odometry required
+
+2) Fallback (legacy behavior):
+   - Uses PX4 vehicle odometry
+   - Uses camera + pole metadata
+   - Projects 3D pole geometry into the image to compute bounding boxes
+
+Outputs:
+- images/
+- labels/          (YOLO txt)
+- annotation/      (CVAT-compatible structure)
+- meta3d/          (optional JSON metadata, odom mode only)
 
 Usage:
   python scripts/parse_bag_to_yolo.py \
@@ -23,295 +41,308 @@ import numpy as np
 import cv2
 from tqdm import tqdm
 
-# local module
-from label_from_odometry import load_metadata, compute_bbox_from_odom, is_metadata_loaded
+# Local module:
+# - loads camera / pole metadata
+# - computes bounding boxes from odometry
+from label_from_odometry import (
+    load_metadata,
+    compute_bbox_from_odom,
+    is_metadata_loaded,
+)
 
-# For quaternion / rotation math (used for converting px4 odometry -> transform)
-from scipy.spatial.transform import Rotation as R
+from rosbags.rosbag2 import Reader
+from rosbags.typesys import Stores, get_typestore, get_types_from_msg
 
-# Attempt to import bag readers. Preferred: rosbags. Fallback: rosbag2_py (ROS2).
+# --------------------------
+# Bag reader availability
+# --------------------------
 _HAS_ROSBAGS = False
 
 try:
-    # Modern 'rosbags' API (v0.9+)
+    # Modern rosbags API
     from rosbags.highlevel import AnyReader
     _HAS_ROSBAGS = True
 except ImportError:
     try:
-        # Legacy API (pre-0.9)
-        from rosbags.rosbag2 import Reader as RosbagsReader
+        # Legacy rosbags API
+        from rosbags.rosbag2 import Reader
         from rosbags.typesys import deserialize_cdr
         _HAS_ROSBAGS = True
     except ImportError:
         pass
 
-try:
-    import rosbag2_py
-except ImportError:
-    rosbag2_py = None
-
-if not _HAS_ROSBAGS and rosbag2_py is None:
-    print("❌ Neither 'rosbags' nor 'rosbag2_py' is available. Please install with: pip install rosbags")
+if not _HAS_ROSBAGS:
+    print("❌ 'rosbags' not available. Install with: pip install rosbags")
     sys.exit(1)
-
 
 # --------------------------
 # Configurable defaults
 # --------------------------
-DEFAULT_LINEAR_VEL_THRESH = 2     # m/s (filter)
-DEFAULT_ANGULAR_VEL_THRESH = 1    # rad/s (filter)
-DEFAULT_SAMPLE_STRIDE = 5         # Keep every Nth frame  
-CLASS_ID = 0                      # single-class (pole) for YOLO
+DEFAULT_LINEAR_VEL_THRESH = 2.0     # m/s
+DEFAULT_ANGULAR_VEL_THRESH = 1.0    # rad/s
+DEFAULT_SAMPLE_STRIDE = 5           # Keep every Nth frame
+CLASS_ID = 0                        # Single-class (pole)
+
+# Preferred bounding box topic
+BBOX_TOPIC = "/featureDetection/bbox"
 
 
-def create_cvat_annotation_zip(cvat_dir: Path, out_dir: Path) -> Path:
+def create_cvat_annotation_zip(cvat_dir, out_dir) -> Path:
     """
-    Creates a CVAT-compatible annotation.zip file.
-    
-    Args:
-        cvat_dir (Path): Path to the directory containing the converted CVAT dataset.
-        out_dir (Path): Directory where annotation.zip should be saved.
-
-    Returns:
-        Path: The path to the generated annotation.zip file.
+    Creates a CVAT-compatible annotation.zip file from the generated dataset.
     """
+    from pathlib import Path
     import zipfile
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = out_dir / "annotation.zip"
+    # Ensure Path types
+    cvat_dir = Path(cvat_dir)
+    out_dir = Path(out_dir)
 
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for file in cvat_dir.rglob('*'):
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    zip_path = out_dir / "annotation.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file in cvat_dir.rglob("*"):
             zf.write(file, file.relative_to(cvat_dir.parent))
 
     print(f"CVAT annotation zip created: {zip_path}")
     return zip_path
 
-def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odom,
-                         lin_thresh, ang_thresh, frame_stride, save_json=True):
+
+def process_with_rosbags(
+    bag_dir,
+    metadata_path,
+    out_dir,
+    topic_image,
+    topic_odom,
+    lin_thresh,
+    ang_thresh,
+    frame_stride,
+    save_json=True,
+):
     """
-    Use 'rosbags' Reader to iterate messages and produce dataset.
+    Main processing routine.
+
+    - Iterates through rosbag messages
+    - Detects whether /featureDetection/bbox exists
+    - Selects labeling strategy automatically
+    - Writes YOLO labels, images, and optional metadata
     """
     from rosbags.rosbag2 import Reader
     from rosbags.serde import deserialize_cdr
-    from rosbags.typesys import get_types_from_msg, register_types
+    from rosbags.typesys import get_types_from_msg
+    from rosbags.typesys import Stores, get_typestore
+    from pathlib import Path
 
-    # try to register px4 msg types if available under ./msg
-    px4_msgs_path = Path('msg')
-    if px4_msgs_path.exists():
-        msg_files = list(px4_msgs_path.glob('*.msg'))
-        all_types = {}
-        for msg_file in msg_files:
-            package_name = 'px4_msgs'
-            msg_name = msg_file.stem
-            text = msg_file.read_text()
-            types = get_types_from_msg(text, f'{package_name}/msg/{msg_name}')
+    # Create explicit TypeStore
+    typestore = get_typestore(Stores.ROS2_HUMBLE)
+
+    # --------------------------------------------------
+    # Register message definitions (local + system)
+    # --------------------------------------------------
+    all_types = {}
+
+    # Local msg definitions (if any)
+    msg_dir = Path("msg")
+    if msg_dir.exists():
+        for msg_file in msg_dir.glob("*.msg"):
+            pkg = "px4_msgs"
+            types = get_types_from_msg(
+                msg_file.read_text(),
+                f"{pkg}/msg/{msg_file.stem}",
+            )
             all_types.update(types)
-        register_types(all_types)
 
-    # Create output folders
+    # System-installed vision_msgs (REQUIRED)
+    vision_msgs_path = Path("/opt/ros/humble/share/vision_msgs/msg")
+    if vision_msgs_path.exists():
+        for msg_file in vision_msgs_path.glob("*.msg"):
+            types = get_types_from_msg(
+                msg_file.read_text(),
+                f"vision_msgs/msg/{msg_file.stem}",
+            )
+            all_types.update(types)
+
+    # Register all collected types
+    if all_types:
+        typestore.register(all_types)
+
+    # --------------------------------------------------
+    # Output directory structure
+    # --------------------------------------------------
     images_dir = Path(out_dir) / "images"
     labels_dir = Path(out_dir) / "labels"
     json_dir = Path(out_dir) / "meta3d"
-    images_dir.mkdir(parents=True, exist_ok=True)
-    labels_dir.mkdir(parents=True, exist_ok=True)
+
+    cvat_dir = Path(out_dir) / "annotation"
+    images_cvat_dir = cvat_dir / "obj_train_data" / "images"
+
+    for d in [images_dir, labels_dir, images_cvat_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+
     if save_json:
         json_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create output folder for CVAT
-    cvat_dir = Path(out_dir) / "annotation"
-    images_cvat_dir = cvat_dir / "obj_train_data" / "images"
-    images_cvat_dir.mkdir(parents=True, exist_ok=True)
+    # --------------------------------------------------
+    # CVAT boilerplate files
+    # --------------------------------------------------
+    (cvat_dir / "obj.names").write_text("pole\n")
+    (cvat_dir / "obj.data").write_text(
+        "classes = 1\n"
+        "train = train.txt\n"
+        "names = obj.names\n"
+        "backup = backup/\n"
+    )
 
-    # Write class names and obj.data
-    class_names_file = cvat_dir / "obj.names"
-    obj_data_file = cvat_dir / "obj.data"
     train_file = cvat_dir / "train.txt"
+    train_lines = train_file.read_text().splitlines() if train_file.exists() else []
 
-    # Single-class example
-    with open(class_names_file, 'w') as f:
-        f.write("pole\n")
-
-    with open(obj_data_file, 'w') as f:
-        f.write(f"classes = 1\n")
-        f.write(f"train = {train_file.relative_to(cvat_dir)}\n")
-        f.write(f"names = {class_names_file.relative_to(cvat_dir)}\n")
-        f.write(f"backup = backup/\n")
-
-    # If train.txt exists, load existing lines
-    if train_file.exists():
-        with open(train_file, 'r') as f:
-            train_lines = f.read().splitlines()
-    else:
-        train_lines = []
-
-    # Pre-load metadata
-    load_metadata(metadata_path)
-    if not is_metadata_loaded():
-        raise RuntimeError("Failed to load metadata")
-
-    # Open bag reader
-    print("Opening bag (rosbags)...")
+    # --------------------------------------------------
+    # Open bag and inspect available topics
+    # --------------------------------------------------
     reader = Reader(bag_dir)
     reader.open()
 
-    # Map topic -> connection info for quick checks
-    conns = {c.topic: c for c in reader.connections}
-    if topic_image not in conns or topic_odom not in conns:
-        print("Available topics in bag:", [c.topic for c in reader.connections])
-        raise RuntimeError("Requested topics not found in bag. Check topic names.")
+    topics = {c.topic for c in reader.connections}
 
-    latest_odom = None
-    existing_images = list(images_cvat_dir.glob("*.jpg"))
-    if existing_images:
-        # get the max existing frame index
-        last_idx = max(int(p.stem) for p in existing_images) + 1
+    # Decide labeling mode
+    use_bbox_topic = BBOX_TOPIC in topics
+
+    if use_bbox_topic:
+        print(f"✅ Using bounding boxes from topic: {BBOX_TOPIC}")
     else:
-        last_idx = 0
-    frame_idx = last_idx
+        print("⚠️  BBox topic not found. Falling back to odometry-based labeling.")
 
-    image_number = 0
+        if metadata_path is None:
+            raise RuntimeError(
+                "Metadata file is required when /featureDetection/bbox is not available."
+            )
 
-    for connection, timestamp, rawdata in tqdm(reader.messages(), desc="Reading bag"):
-        topic = connection.topic
-        msg = deserialize_cdr(rawdata, connection.msgtype)
+        load_metadata(metadata_path)
+        if not is_metadata_loaded():
+            raise RuntimeError("Failed to load metadata")
 
-        if topic == topic_odom:
-            # Attempt to read px4 VehicleOdometry fields
+        if topic_odom not in topics:
+            raise RuntimeError("Odometry topic not found in bag")
+
+    # --------------------------------------------------
+    # Runtime state
+    # --------------------------------------------------
+    latest_odom = None          # Latest PX4 odometry
+    latest_bboxes = None        # Latest Detection3DArray
+
+    frame_idx = 0
+    image_counter = 0
+
+    # --------------------------------------------------
+    # Main loop
+    # --------------------------------------------------
+    for conn, timestamp, rawdata in tqdm(reader.messages(), desc="Reading bag"):
+        msg = typestore.deserialize_cdr(rawdata, conn.msgtype)
+
+        # --------------------------
+        # Odometry update (fallback)
+        # --------------------------
+        if conn.topic == topic_odom and not use_bbox_topic:
             try:
-                pos_odom = np.array([msg.position[0], msg.position[1], msg.position[2]], dtype=float)
-                q_odom = np.array([msg.q[0], msg.q[1], msg.q[2], msg.q[3]], dtype=float)  # w x y z?
-                vel = np.array([msg.velocity[0], msg.velocity[1], msg.velocity[2]], dtype=float)
-                ang_vel = np.array([msg.angular_velocity[0], msg.angular_velocity[1], msg.angular_velocity[2]], dtype=float)
+                latest_odom = {
+                    "pos": np.array(msg.position, dtype=float),
+                    "q": np.array(msg.q, dtype=float),
+                    "v_lin": float(np.linalg.norm(msg.velocity)),
+                    "v_ang": float(np.linalg.norm(msg.angular_velocity)),
+                }
             except Exception:
-                # field mismatch: skip this message
                 continue
 
-            latest_odom = {
-                'pos_odom': pos_odom,
-                'q_odom': q_odom,
-                'vel_lin': float(np.linalg.norm(vel)),
-                'vel_ang': float(np.linalg.norm(ang_vel))
-            }
+        # --------------------------
+        # Bounding box update
+        # --------------------------
+        elif conn.topic == BBOX_TOPIC and use_bbox_topic:
+            latest_bboxes = msg.detections
 
-        elif topic == topic_image:
-            image_number += 1
-            if (image_number % frame_stride != 0):
-                continue   
-
-            if latest_odom is None:
+        # --------------------------
+        # Image handling
+        # --------------------------
+        elif conn.topic == topic_image:
+            image_counter += 1
+            if image_counter % frame_stride != 0:
                 continue
 
-            # Filter by thresholds
-            if latest_odom['vel_lin'] > lin_thresh or latest_odom['vel_ang'] > ang_thresh:
+            if use_bbox_topic and latest_bboxes is None:
+                continue
+
+            if not use_bbox_topic and latest_odom is None:
                 continue
 
             # Deserialize image
             try:
-                height = int(msg.height)
-                width = int(msg.width)
-                encoding = msg.encoding
-                arr = np.frombuffer(msg.data, dtype=np.uint8)
-                if encoding in ('rgb8', 'bgr8'):
-                    img = arr.reshape((height, width, 3))
-                    if encoding == 'rgb8':
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                elif encoding == 'mono8':
-                    img = arr.reshape((height, width))
-                else:
-                    img = arr.reshape((height, width, -1))
+                h, w = msg.height, msg.width
+                img = np.frombuffer(msg.data, dtype=np.uint8).reshape(h, w, -1)
             except Exception:
-                # skip malformed image message
                 continue
 
-            # Compute bbox via label_from_odometry
-            pos_odom = latest_odom['pos_odom']
-            q_odom = latest_odom['q_odom']
-            results = compute_bbox_from_odom(pos_odom, q_odom, img.shape, pole_height=None, debug=False)
+            label_path = labels_dir / f"{frame_idx:06d}.txt"
+            cvat_label_path = images_cvat_dir / f"{frame_idx:06d}.txt"
 
-            skipSample = False
-            proj_centers = []
-            poles_cam = []
-            poles_bottom_cam = []
-            poles_top_cam = []
+            with open(label_path, "w") as label_f, open(cvat_label_path, "w") as cvat_label_f:
 
-            label_filename = f"{frame_idx:06d}.txt"  
-            for res in results:
-                if not res.get('valid', False):
-                    if res.get('reason') != "not_visible":
-                        skipSample = True
-                    # optional: log reason when debugging
-                    print("skipping object:", res.get('reason'))
-                    continue
+                # --------------------------
+                # Mode 1: BBox topic
+                # --------------------------
+                if use_bbox_topic:
+                    for det in latest_bboxes:
+                        bb = det.bbox
+                        x_c = bb.center.position.x
+                        y_c = bb.center.position.y
+                        bbox_w = bb.size.x
+                        bbox_h = bb.size.y
 
-                # Unpack results and save
-                bbox_norm = res['bbox_norm']
-                proj_center = res['proj_center']
-                pole_cam = res['pole_cam']
-                pole_bottom_cam = res['pole_bottom_cam']
-                pole_top_cam = res['pole_top_cam']
+                        # Defensive check: normalized values
+                        if not (0.0 <= x_c <= 1.0 and 0.0 <= y_c <= 1.0):
+                            continue
 
-                proj_centers.append(proj_center)
-                poles_cam.append(pole_cam)
-                poles_bottom_cam.append(pole_bottom_cam)
-                poles_top_cam.append(pole_top_cam)
-            
-                # write YOLO label
-                with open(str(labels_dir / label_filename), 'a') as f:
-                    x_c, y_c, w, h = bbox_norm
-                    f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}\n")
+                        label_f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {bbox_w:.6f} {bbox_h:.6f}\n")
+                        cvat_label_f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {bbox_w:.6f} {bbox_h:.6f}\n")
 
-                # Save label for CVAT
-                with open(str(images_cvat_dir / label_filename), 'a') as f:
-                    x_c, y_c, w, h = bbox_norm
-                    f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}\n")
+                # --------------------------
+                # Mode 2: Odometry fallback
+                # --------------------------
+                else:
+                    if (
+                        latest_odom["v_lin"] > lin_thresh
+                        or latest_odom["v_ang"] > ang_thresh
+                    ):
+                        continue
 
-            if skipSample:
-                print("skipping frame")
-                continue
+                    results = compute_bbox_from_odom(
+                        latest_odom["pos"],
+                        latest_odom["q"],
+                        img.shape,
+                        debug=False,
+                    )
 
-            if len(results) == 0:
-                # No poles visible → create empty label file
-                with open(str(images_cvat_dir / label_filename), 'w') as f:
-                    f.write("")
-                with open(str(labels_dir / label_filename), 'w') as f:
-                    f.write("")
+                    for res in results:
+                        if not res.get("valid", False):
+                            continue
 
-            img_filename = f"{frame_idx:06d}.jpg"
-            cv2.imwrite(str(images_dir / img_filename), img)
+                        x_c, y_c, bbox_w, bbox_h = res["bbox_norm"]
+                        label_f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {bbox_w:.6f} {bbox_h:.6f}\n")
+                        cvat_label_f.write(f"{CLASS_ID} {x_c:.6f} {y_c:.6f} {bbox_w:.6f} {bbox_h:.6f}\n")
 
             # Save image
-            cv2.imwrite(str(images_cvat_dir / img_filename), img)
+            img_name = f"{frame_idx:06d}.jpg"
+            cv2.imwrite(str(images_dir / img_name), img)
+            cv2.imwrite(str(images_cvat_dir / img_name), img)
 
-            # Update train.txt with relative path to image
-            train_lines.append(str((images_cvat_dir / img_filename).relative_to(cvat_dir)))
-
-            # Write train.txt incrementally
-            with open(train_file, 'w') as f:
-                f.write("\n".join(train_lines) + "\n")
-
-            # metadata
-            json_filename = f"{frame_idx:06d}.json"
-
-            if save_json:
-                meta = {
-                    'frame_index': frame_idx,
-                    'img_file': img_filename,
-                    'pole_cam_xyz': [p.tolist() for p in poles_cam],
-                    'pole_bottom_cam_xyz': [p.tolist() for p in poles_bottom_cam],
-                    'pole_top_cam_xyz': [p.tolist() for p in poles_top_cam],
-                    'proj_center': [list(p) for p in proj_centers],
-                    'odom_linear_speed': latest_odom['vel_lin'],
-                    'odom_angular_speed': latest_odom['vel_ang'],
-                }
-                with open(str(json_dir / json_filename), 'w') as jf:
-                    json.dump(meta, jf, indent=2)
+            # Update train.txt
+            train_lines.append(str((images_cvat_dir / img_name).relative_to(cvat_dir)))
+            train_file.write_text("\n".join(train_lines) + "\n")
 
             frame_idx += 1
 
-    print(f"Saved {frame_idx} samples to {out_dir}")
-    zip_file = create_cvat_annotation_zip(cvat_dir, out_dir)
     reader.close()
+    print(f"Saved {frame_idx} samples to {out_dir}")
+    create_cvat_annotation_zip(cvat_dir, out_dir)
 
 
 # --------------------------
@@ -319,30 +350,30 @@ def process_with_rosbags(bag_dir, metadata_path, out_dir, topic_image, topic_odo
 # --------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bag", required=True, help="Path to rosbag folder (directory used by ros2 bag).")
-    parser.add_argument("--metadata", required=True, help="Path to metadata.xml (base_to_camera, pole_position, intrinsics).")
-    parser.add_argument("--output", required=True, help="Output directory (e.g. data/train/)")
-    parser.add_argument("--topic-image", default="/camera", help="Image topic name in bag")
-    parser.add_argument("--topic-odom", default="/fmu/out/vehicle_odometry", help="Odometry topic name")
+    parser.add_argument("--bag", required=True)
+    parser.add_argument("--metadata", required=False)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--topic-image", default="/camera")
+    parser.add_argument("--topic-odom", default="/fmu/out/vehicle_odometry")
     parser.add_argument("--linear-thresh", type=float, default=DEFAULT_LINEAR_VEL_THRESH)
     parser.add_argument("--angular-thresh", type=float, default=DEFAULT_ANGULAR_VEL_THRESH)
-    parser.add_argument("--frame_stride", type=int , default=DEFAULT_SAMPLE_STRIDE)
+    parser.add_argument("--frame_stride", type=int, default=DEFAULT_SAMPLE_STRIDE)
     parser.add_argument("--no-json", dest="save_json", action="store_false")
+
     args = parser.parse_args()
+    Path(args.output).mkdir(parents=True, exist_ok=True)
 
-    out_dir = Path(args.output)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # pass metadata path to loading routine (load once)
-    load_metadata(args.metadata)
-
-    if _HAS_ROSBAGS:
-        process_with_rosbags(args.bag, args.metadata, out_dir, args.topic_image, args.topic_odom,
-                             args.linear_thresh, args.angular_thresh, args.frame_stride,
-                             save_json=args.save_json)
-    else:
-        print("rosbags package not available. Please install it: pip install rosbags")
-        sys.exit(1)
+    process_with_rosbags(
+        args.bag,
+        args.metadata,
+        args.output,
+        args.topic_image,
+        args.topic_odom,
+        args.linear_thresh,
+        args.angular_thresh,
+        args.frame_stride,
+        save_json=args.save_json,
+    )
 
 
 if __name__ == "__main__":

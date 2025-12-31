@@ -30,46 +30,80 @@ To collect this data, we record relevant topics from the **Gazebo simulator** in
 
 The following topics should be stored:
 
-
 <pre>
-ros2 bag record /camera /fmu/out/vehicle_odometry
+ros2 bag record /camera /fmu/out/vehicle_odometry /featureDetection/bbox
 </pre>
 
-Need to provide a metadata.xml file for needed information to extract the label. It would be something like:
+## 📦 Label Source Options
+
+There are now **two supported labeling modes**:
+
+### Option A: Detection-based labeling (recommended)
+
+If a bounding box topic exists (e.g. from a detector or perception node), **no metadata file is required**.
+
+- Bounding boxes are read directly from:
+<pre>
+/featureDetection/bbox
+</pre>
+
+- Odometry and analytical projection are **not used**
+- This is the preferred mode when detections are already available
+
+### Option B: Analytical labeling (fallback)
+
+If no bounding box topic exists, labels are generated using:
+- Robot odometry
+- Known pole position
+- Camera calibration
+
+In this case, a `metadata.xml` file **must** be provided.
+
+Example `metadata.xml`:
+
 ```xml
 <?xml version="1.0"?>
 <scene>
-  <!-- base -> camera pose as: x y z roll pitch yaw (radians) -->
-  <base_to_camera>0.12 0.03 0.242 0 0.785 0</base_to_camera>
+<!-- base -> camera pose as: x y z roll pitch yaw (radians) -->
+<base_to_camera>0.12 0.03 0.242 0 0.785 0</base_to_camera>
 
-  <!-- pole position in world frame: x y z roll pitch yaw -->
-  <!-- this should be world coordinates where you placed the pole in Gazebo -->
-  <pole_position>2 0 -0.5 0 0 0</pole_position>
+<!-- pole position in world frame: x y z roll pitch yaw -->
+<!-- this should be world coordinates where you placed the pole in Gazebo -->
+<pole_position>2 0 -0.5 0 0 0</pole_position>
 
-  <!-- camera intrinsics: fx fy cx cy (we'll parse K entry in your file) -->
-  <camera_intrinsics>1393 1393 960 540</camera_intrinsics>
+<!-- camera intrinsics: fx fy cx cy (parsed into camera matrix K) -->
+<camera_intrinsics>1393 1393 960 540</camera_intrinsics>
 
-  <!-- pole physical height (meters) used to estimate bbox extent -->
-  <pole_height>1.0</pole_height>
+<!-- pole physical height (meters) used to estimate bbox extent -->
+<pole_height>1.0</pole_height>
 </scene>
 ```
-Setup the environment
-
-<pre>
-python3 -m venv .venv
-source .venv/bin/activate
+### 🛠️ Environment Setup & Dataset Generation
+<pre> 
+python3 -m venv .venv source .venv/bin/activate
 pip install -r requirements.txt
 pip install rosbags==0.9.21
-
-python scripts/parse_bag_to_yolo.py \
-  --bag bags/2025_12_27-10_34_22/rosbag2_2025_12_27-10_34_22 \
-  --metadata bags/2025_12_27-10_34_22/metadata.xml \
-  --output data/train_3_2025_12_27-10_34_22 \
-  --topic-image /camera \
-  --topic-odom /fmu/out/vehicle_odometry
-  --frame_stride 10
 </pre>
 
+Using detection-based labeling (no metadata required)
+<pre>
+python scripts/parse_bag_to_yolo.py \
+  --bag bags/2025_12_30-07_52_55//rosbag2_2025_12_30-07_52_55 \
+  --output data/train_3_2025_12_30-07_52_55 \
+  --topic-image /camera \
+  --frame_stride 10
+</pre>
+</pre>
+
+Using analytical labeling (metadata required)
+<pre>
+python scripts/parse_bag_to_yolo.py \
+  --bag bags/2025_12_30-07_52_55//rosbag2_2025_12_30-07_52_55 \
+  --metadata bags/2025_12_30-07_52_55//metadata.xml \
+  --output data/train_3_2025_12_30-07_52_55 \
+  --topic-image /camera \
+  --frame_stride 10
+</pre>
 
 ## Tool to validate data
 This tool we subscribe to odom and image and show bounding box of the image, better to run in a seperate environment as it needs different depedencies version.
