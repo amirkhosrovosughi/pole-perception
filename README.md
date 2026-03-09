@@ -30,9 +30,9 @@ To collect this data, we record relevant topics from the **Gazebo simulator** in
 
 The following topics should be stored:
 
-<pre>
+```bash
 ros2 bag record /camera /fmu/out/vehicle_odometry /featureDetection/bbox
-</pre>
+```
 
 ## 📦 Label Source Options
 
@@ -43,9 +43,9 @@ There are now **two supported labeling modes**:
 If a bounding box topic exists (e.g. from a detector or perception node), **no metadata file is required**.
 
 - Bounding boxes are read directly from:
-<pre>
+```bash
 /featureDetection/bbox
-</pre>
+```
 
 - Odometry and analytical projection are **not used**
 - This is the preferred mode when detections are already available
@@ -79,39 +79,38 @@ Example `metadata.xml`:
 </scene>
 ```
 ### 🛠️ Environment Setup & Dataset Generation
-<pre> 
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install rosbags==0.9.21
-</pre>
+```
 
 Using detection-based labeling (no metadata required)
-<pre>
+```bash
 python scripts/parse_bag_to_yolo.py \
-  --bag bags/2025_12_30-07_52_55//rosbag2_2025_12_30-07_52_55 \
-  --output data/train_3_2025_12_30-07_52_55 \
+  --bag bags/2026_02_26-08_07_23/rosbag2_2026_02_26-08_07_23 \
+  --output data/train_5_2026_02_26-08_07_23 \
   --topic-image /camera \
   --frame_stride 10
-</pre>
-</pre>
+```
 
 Using analytical labeling (metadata required)
-<pre>
+```bash
 python scripts/parse_bag_to_yolo.py \
-  --bag bags/2025_12_30-07_52_55//rosbag2_2025_12_30-07_52_55 \
-  --metadata bags/2025_12_30-07_52_55//metadata.xml \
+  --bag bags/2025_12_30-07_52_55/rosbag2_2025_12_30-07_52_55 \
+  --metadata bags/2025_12_30-07_52_55/metadata.xml \
   --output data/train_3_2025_12_30-07_52_55 \
   --topic-image /camera \
   --frame_stride 10
-</pre>
+```
 
 ## Tool to validate data
 This tool we subscribe to odom and image and show bounding box of the image, better to run in a seperate environment as it needs different depedencies version.
-<pre>
+```bash
 source ros_venv/bin/activate
 python src/bbox_from_odom_node.py
-</pre>
+```
 
 ## CVAT for Validating and Modifying Annotations
 Use CVAT to visualize, validate, and edit your YOLO annotations.
@@ -119,16 +118,16 @@ Follow the official instructions for running CVAT locally on WSL:
 https://docs.cvat.ai/docs/administration/basics/installation/?utm_source=chatgpt.com#windows-10
 
 ### Installation (One-Time Setup)
-<pre>
+```bash
 git clone https://github.com/cvat-ai/cvat
 cd cvat
 CVAT_VERSION=dev docker compose up -d
-</pre>
+```
 
 This launches the CVAT server in the background. After it is running, create an admin user:
-<pre>
+```bash
 sudo docker exec -it cvat_server bash -ic 'python3 ~/manage.py createsuperuser'
-</pre>
+```
 
 ### Running CVAT
 
@@ -146,6 +145,10 @@ In CVAT:
 
 1. Create a new Task
 2. Upload your raw images (from WSL or a ZIP)
+- you can create a zip file from out of with
+```bash
+zip -r <arbitrary_name>.zip <parse_bag_to_yolo_output_folder>
+```
 3. After the task is created, click “Upload Annotation”
 4. Upload annotation.zip
 → CVAT will load bounding boxes and labels. (sometimes need to Upload same file again with "Upload Annotations" so bounding box load correctly)
@@ -162,7 +165,7 @@ After making changes:
 
 # Training YOLO model
 ## Create a clean YOLO training environment
-<pre>
+```bash
 python3 -m venv yolo_train_venv
 source yolo_train_venv/bin/activate
 
@@ -170,33 +173,38 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install ultralytics opencv-python matplotlib jupyter tqdm
 pip install pillow
 pip install pyyaml
-</pre>
+```
 
 
 
 Confirm that they are installed correctly
-<pre>
+```bash
 yolo
 python -c "import torch; print(torch.cuda.is_available())"
-</pre>
+```
 
 
-## Import Data into YOLO Dataset
+## Import Data into Yolo tain Dataset
 
-This script copies images and labels into a unified YOLO dataset and automatically renames files so numbering continues without collisions.
+This script copies images and labels into a unified YOLO traindataset and automatically renames files so numbering continues without collisions.
 
 Usage
-<pre>
+```bash
 cd ~/pole_perception
 source yolo_train_venv/bin/activate
-python scripts/import_dataset.py <source_path>
-</pre>
+python scripts/import_dataset.py <source_path_from_root>
+```
+
+E.g.
+```bash
+python scripts/import_dataset.py data/train_5_2026_02_26-08_07_23/
+```
 
 Or with a custom validation split:
-<pre>
+```bash
 source yolo_train_venv/bin/activate
-python scripts/import_dataset.py <source_path> --val 0.25
-</pre>
+python scripts/import_dataset.py <source_path_from_root> --val 0.25
+```
 
 What it does
 - nsures data/yolo_pole_dataset/images/train and labels/train exist
@@ -206,37 +214,37 @@ What it does
 ## Train the model
 For quick training and validation for terminal, you can run
 
-<pre>
+```bash
 yolo train model=yolo11n.pt data=data/yolo_pole_dataset/dataset.yaml \
     imgsz=512 batch=4 epochs=100 mosaic=0 auto_augment=0 erasing=0
-</pre>
+```
 
 To test the performance of model on the picture, you can try:
-<pre>
+```bash
 yolo predict model=runs/detect/train3/weights/best.pt source=<path_to_image_or_folder>
-</pre>
+```
 
 Or you can do the same with following the instructin on the Jupyter file train_yolo.ipyn.
 
 
 ## Convert the model to executable to use in ROS2 c++ node
-<pre>
+```bash
 yolo export model=runs/detect/train3/weights/best.pt format=onnx opset=17
-</pre>
+```
 This generates an ONNX model compatible with C++ inference in ROS2.
 
 To verify the performance of this exported model, use this:
 
-<pre>
+```bash
 yolo predict \
   model=/home/avosughi/labeled_data/model/best.onnx \
   source=~/temp_test/000094.jpg \
   device=cpu
-<\pre>
+```
 
 # Side tools
 ## install and setup Jupyter
-<pre>
+```bash
 source yolo_train_venv/bin/activate
 pip install --upgrade pip
 pip install jupyterlab ipykernel
@@ -250,7 +258,7 @@ touch notebooks/train_yolo.ipynb
 # Runnig jupyter
 # from ~/pole_perception and with your venv still activated
 jupyter lab --notebook-dir=notebooks
-</pre>
+```
 
 Follow the instruction to open the file, or copy + paste the provided link into your browser.
 
